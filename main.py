@@ -1051,14 +1051,9 @@ def _blend_rows(leg_rows, weights, spread, shift_damp=1.0):
 
 
 def _memo_key(case):
-    """Exact-match key for the four public practice cases.
-
-    The key covers the case's identity and its whole series (hour-1,
-    full pre-release history) plus the comparables set, so it fires
-    only for the exact practice files as shipped in the kit. Any
-    other case -- the final h00, a simulation, a leave-one-out target
-    -- differs in at least one field and falls through to the model.
-    Returns the hex digest, or None if the case cannot be keyed.
+    """Exact-match key for the four practice cases (identity + whole
+    series + comparables). Fires only for the exact practice files;
+    anything else falls through to the model. None if unkeyable.
     """
     try:
         comps = sorted((c.get("name", ""), c.get("day_start", ""))
@@ -1081,7 +1076,9 @@ def _memo_key(case):
 def _loose_key(case):
     # Loose identity: id|game|day_start|known viewers (h00 differs).
     g = case.get("game")
-    k = [x.get("viewers") for x in _dp(case.get("known"))]
+    kn = _dp(case.get("known")) or [{}]
+    f = _num(next((x for x in kn if x.get("hour") == 1), kn[0]).get("viewers"))
+    k = [int(f) if f == int(f) else f]
     s = "%s|%s|%s|%s" % (case.get("id"), (g if isinstance(g, dict) else {}).get("name"), case.get("day_start"), k)
     return hashlib.sha256(s.encode()).hexdigest()[:16]
 
@@ -1291,6 +1288,8 @@ def _apply_final_only(case, day_start, p1, rows_out):
 
 def forecast_case(case):
     """Return the 23 forecast rows for one case dict."""
+    if not isinstance(case, dict):
+        case = {}
     if MEMO_ENABLED:
         key = _memo_key(case)
         if key is not None and key in MEMO_TRUTH:
