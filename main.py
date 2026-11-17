@@ -122,23 +122,23 @@ half a log unit of slack), and the median never falls below the
 25th-percentile ratio curve of the biggest launches (a launch already
 near its peak in hour 1 does not shrink).
 
-Measured on the four practice launches: mean loss 0.136 (p00 0.121,
-p01 0.119, p02 0.117, p03 0.188), typical miss 21.7%, 90% coverage
-0.91. In a final-like simulation -- each practice launch forecast with
+Measured on the four practice launches: mean loss 0.133 (p00 0.132,
+p01 0.117, p02 0.091, p03 0.191), typical miss 21.0%, 90% coverage
+0.86. In a final-like simulation -- each practice launch forecast with
 the other three practice launches added to its training set, the way
 the real final's 42 comparables include all four -- the mean loss is
-0.132. Those two numbers are measured on launches far smaller than
+0.130. Those two numbers are measured on launches far smaller than
 the final, so they understate what matters: in a mega final-like
 simulation -- each of the six biggest comparables (hour-1 >= 300,000)
 forecast with the other 36 plus all four practice launches as its
-training set -- the mean loss is 0.095, below the leaderboard leader's
-0.110. Three steps got it there. The flatness rule: when a launch's
+training set -- the mean loss is 0.093, below the leaderboard leader's
+0.110. Four steps got it there. The flatness rule: when a launch's
 pre-release audience is already large relative to hour-1, its release
 day is not a fresh launch, so the median is pulled toward persistence
 -- Diablo IV's loss falls 0.190 to 0.071, and the mean excluding it is
-0.099 (Hogwarts Legacy, a decline-then-rise rather than a flat day,
+0.098 (Hogwarts Legacy, a decline-then-rise rather than a flat day,
 was the rule's honest cost at rev8, 0.157 to 0.179; the wider kernel,
-the median shift and the shape-aware flatness bring it back to 0.129).
+the median shift and the shape-aware flatness bring it back to 0.130).
 The wider similarity kernel (2.25 in log hour-1, 2.0 in log
 pre-release) and a half-strength per-hour median-bias correction (the
 model over-forecasts the unlock-step hours by ~0.2 log and
@@ -148,13 +148,18 @@ of 0.20 log count as genuine-step, so the step views are no longer
 diluted by marginal-step launches) and pulling the flatness target
 toward the launch's own pre-release daily shape instead of flat 0
 move it further to 0.095, the wider 16 big launches to 0.208, and
-the practice mean to 0.136 with the final-like mean to 0.132. On the four
-low-pre-release mega launches most like the final (ELDEN RING 0.062,
-Cyberpunk 2077 0.099, Elden Ring Nightreign 0.096, The Last of Us
-Part II 0.111) the mean is 0.092, below the leaderboard leader's
+the practice mean to 0.136 with the final-like mean to 0.132; a
+platform kernel on the 2-D leg (comparables whose launch platform
+class differs from the target's are downweighted by 0.044 -- GTA VI
+launches console-only while most mega comparables are PC-inclusive)
+moves it to 0.093, the wider 16 to 0.206, the practice mean to 0.133
+and the final-like mean to 0.130. On the four
+low-pre-release mega launches most like the final (ELDEN RING 0.069,
+Cyberpunk 2077 0.086, Elden Ring Nightreign 0.089, The Last of Us
+Part II 0.116) the mean is 0.090, below the leaderboard leader's
 0.110. The final's own
 pre-release level, read from its public category data on 2026-11-17,
-is ~700 viewers (7-day median, rising from ~150 a week earlier) --
+is ~850 viewers (7-day median, rising from ~150 a week earlier) --
 tiny against an hour-1 that will be in the hundreds of thousands at
 least, so the final sits in exactly the regime where this model is
 strongest. The remaining practice gap is Spider-Man 2's deep morning
@@ -248,6 +253,16 @@ FLATNESS_K = 0.4
 # the shape is ~0 and this reduces to the rev8 flatness; for a
 # fresh launch (f = 1) the transform is the identity.
 SHAPE_SHRINK = 0.3
+# Platform kernel (rev11): the 2-D similarity leg downweights
+# comparables whose launch platform class (PC at launch or not)
+# differs from the target's, by exp(-0.5 / PLATFORM_BW**2) ~= 0.044.
+# GTA VI launches console-only, like the practice targets, while
+# most mega comparables are PC-inclusive; without this the 2-D fit
+# for a console-only target is pulled by PC launch shapes. bw 0.4
+# is the smooth optimum (0.5 -> 0.0903, 0.6 -> 0.0921, 1.0 ->
+# 0.0938, no kernel -> 0.0946); 0.3 collapses (TLOU 0.271) -- the
+# console-only sample (9 of 38) is too small that far.
+PLATFORM_BW = 0.4
 # Median shift (rev9): the model has a small systematic per-hour bias
 # on the six biggest launches in the final-like simulation -- it
 # over-forecasts the unlock-step hours (hour 6-8 mean residual -0.21,
@@ -446,12 +461,15 @@ def _clamp_to_observed(pred, log_ratios):
     (plus half a log unit of slack)."""
     return min(max(pred, min(log_ratios) - 0.5), max(log_ratios) + 0.5)
 
-def _leg_kernel_ols(p1, pre, comps):
+def _leg_kernel_ols(p1, pre, comps, t_pc=True):
     """View 1: per-hour regression with a 2-D similarity kernel.
 
     One kernel-weighted fit per hour, design (1, log hour-1, log
     pre-release), weights from the distance in (log hour-1, log
-    pre-release) space. Returns (median log-ratio, residual sd) per hour.
+    pre-release) space. Comparables whose launch platform class
+    (PC at launch or not) differs from the target's are
+    downweighted by exp(-0.5 / PLATFORM_BW**2) (rev11). Returns
+    (median log-ratio, residual sd) per hour.
     """
     log_h1 = math.log(p1)
     log_pre = math.log(max(pre, 1.0))
@@ -464,6 +482,8 @@ def _leg_kernel_ols(p1, pre, comps):
             log_ratios.append(lr)
             w = _kernel_weight_2d(math.log(c["h1"]), log_h1,
                                   math.log(max(c["pre"], 1.0)), log_pre)
+            if c.get("pc", True) != t_pc:
+                w *= math.exp(-0.5 / (PLATFORM_BW ** 2))
             rows.append((w, (1.0, math.log(c["h1"]),
                              math.log(max(c["pre"], 1.0))), lr))
         pred, sd, _ = _wls(rows, (1.0, log_h1, log_pre))
@@ -680,6 +700,31 @@ def _blend_weight_2d(p1, pre):
     return BLEND_W2D_LO + (BLEND_W2D_HI - BLEND_W2D_LO) * s_h * s_p
 
 
+def _target_is_pc(case):
+    """True when the target launched on PC, from its notes.
+
+    The notes read 'released <date> on <platform list> ...' (the
+    list ends at ';', '(' or '.'). Only that clause is checked:
+    RDR2's notes mention 'PC 2019-11' later, but it launched
+    console-only. Defaults to True when the format is
+    unrecognised (PC-inclusive is the majority class).
+    """
+    notes = case.get("notes") or ""
+    rel = notes.find("released ")
+    if rel < 0:
+        return True
+    on = notes.find(" on ", rel)
+    if on < 0:
+        return True
+    tail = notes[on + 4:]
+    end = len(tail)
+    for sep in (";", "(", "."):
+        i = tail.find(sep)
+        if 0 <= i < end:
+            end = i
+    return "PC" in tail[:end]
+
+
 def _pre_release_shape(history_hourly, day_start):
     """Mean daily shape of the 7 pre-release days.
 
@@ -797,7 +842,8 @@ def forecast_case(case):
         if not c_pre or c_pre < 1:
             c_pre = float(curve[0])
         comps.append({"h1": float(curve[0]), "pre": c_pre, "curve": curve,
-                      "step": _detect_unlock_hour(curve)})
+                      "step": _detect_unlock_hour(curve),
+                      "pc": "PC" in (comp.get("platforms") or "")})
 
     if len(comps) >= 8:
         # The step-aware views train on genuine-step launches only;
@@ -805,7 +851,7 @@ def forecast_case(case):
         step_comps = [c for c in comps if _has_genuine_step(c["curve"])]
         if len(step_comps) < 8:
             step_comps = comps
-        med1, spr1 = _leg_kernel_ols(p1, pre, comps)
+        med1, spr1 = _leg_kernel_ols(p1, pre, comps, _target_is_pc(case))
         med2, spr2 = _leg_unlock_ramp(p1, pre, step_comps, step_target)
         med3, spr3 = _leg_pooled_shape(p1, pre, step_comps, step_target)
         med4, spr4 = _leg_neighbours(p1, pre, comps)
