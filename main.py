@@ -107,8 +107,9 @@ The spread of each view is its own kernel-weighted residual standard
 deviation (times 0.75, clamped to [0.25, 1.5] log units), turned into
 normal quantiles. After averaging the four views' log-quantiles the
 spread is rescaled by 0.6: on the practice launches the blended median
-is good enough that the v1-width intervals are far too wide, and 0.6
-puts the 90% coverage at 0.88, close to the nominal 0.90.
+is good enough that the v1-width intervals are far too wide, and the
+adaptive rescale (0.6 at small launches, up to 0.75 at mega launches)
+puts the 90% coverage at 0.89, close to the nominal 0.90.
 
 Two guards keep the forecast sane where the data runs out: each view's
 predicted log-ratio is clamped to the range the comparables show (plus
@@ -116,20 +117,20 @@ half a log unit of slack), and the median never falls below the
 25th-percentile ratio curve of the biggest launches (a launch already
 near its peak in hour 1 does not shrink).
 
-Measured on the four practice launches: mean loss 0.137 (p00 0.133,
-p01 0.124, p02 0.098, p03 0.192), typical miss 24.4%, 90% coverage
-0.88. In a final-like simulation -- each practice launch forecast with
+Measured on the four practice launches: mean loss 0.1365 (p00 0.133,
+p01 0.124, p02 0.098, p03 0.191), typical miss 24.4%, 90% coverage
+0.89. In a final-like simulation -- each practice launch forecast with
 the other three practice launches added to its training set, the way
 the real final's 42 comparables include all four -- the mean loss is
-0.138. Those two numbers are measured on launches far smaller than
+0.137. Those two numbers are measured on launches far smaller than
 the final, so they understate what matters: in a mega final-like
 simulation -- each of the six biggest comparables (hour-1 >= 300,000)
 forecast with the other 36 plus all four practice launches as its
-training set -- the mean loss is 0.126, and 0.109 excluding Diablo IV
+training set -- the mean loss is 0.122, and 0.107 excluding Diablo IV
 (the huge-pre-release outlier). On the four low-pre-release mega
-launches most like the final (ELDEN RING 0.056, Cyberpunk 2077 0.106,
-Elden Ring Nightreign 0.136, The Last of Us Part II 0.085) the mean is
-0.096, below the leaderboard leader's 0.110. The final's own
+launches most like the final (ELDEN RING 0.058, Cyberpunk 2077 0.104,
+Elden Ring Nightreign 0.133, The Last of Us Part II 0.084) the mean is
+0.095, below the leaderboard leader's 0.110. The final's own
 pre-release level, read from its public category data on 2026-11-17,
 is ~700 viewers (7-day median, rising from ~150 a week earlier) --
 tiny against an hour-1 that will be in the hundreds of thousands at
@@ -163,13 +164,20 @@ PRE_WINDOW_DAYS = 7
 # HINGE_H1, and falls back when the pre-release median is large
 # (past HINGE_PRE); the other three views share the remainder.
 # BLEND_SCALE is the logistic scale in log units. The final spread
-# rescale after blending is BLEND_SPREAD.
+# rescale after blending is adaptive too: BLEND_SPREAD_LO at small
+# launches, widening toward BLEND_SPREAD_HI as hour-1 viewers pass
+# HINGE_H1. Big launches deviate further from any median in absolute
+# log terms, so their intervals earn the extra width (measured on the
+# six biggest launches, simulated as the final case: spread 0.6
+# gives 0.1255, adaptive 0.6->0.75 gives 0.1223, practice unchanged
+# at 0.1365, coverage 0.89).
 BLEND_W2D_LO = 0.25
 BLEND_W2D_HI = 1.0
 HINGE_H1 = 300000.0
 HINGE_PRE = 20000.0
 BLEND_SCALE = 0.5
-BLEND_SPREAD = 0.6
+BLEND_SPREAD_LO = 0.6
+BLEND_SPREAD_HI = 0.75
 KNN_K = 8                # nearest launches in the neighbour view
 BIG_H1 = 200000.0        # a "big" launch, for the median floor
 RAMP_CAP = 6             # hours of post-unlock ramp the model can see
@@ -591,13 +599,26 @@ def _blend_weight_2d(p1, pre):
     return BLEND_W2D_LO + (BLEND_W2D_HI - BLEND_W2D_LO) * s_h * s_p
 
 
-def _blend_rows(leg_rows, weights):
+def _blend_spread(p1):
+    """Spread rescale after blending, for this launch.
+
+    Same logistic rise with log hour-1 viewers as the 2-D-kernel
+    weight: small launches keep the tight 0.6 rescale the practice
+    launches earn, while mega launches widen toward 0.75, where the
+    residual scale is larger and the extra width pays for itself.
+    """
+    s_h = 1.0 / (1.0 + math.exp(-(math.log(p1) - math.log(HINGE_H1)) / BLEND_SCALE))
+    return BLEND_SPREAD_LO + (BLEND_SPREAD_HI - BLEND_SPREAD_LO) * s_h
+
+
+def _blend_rows(leg_rows, weights, spread):
     """Average the four views' log-quantiles, then rescale the spread.
 
     Averaging in log space keeps the blend's median between the views'
-    medians and its spread between their spreads; the 0.6 rescale
-    around the blended median narrows the intervals to the width the
-    blended median actually earns on the practice launches.
+    medians and its spread between their spreads; the rescale around
+    the blended median narrows the intervals to the width the blended
+    median actually earns (0.6 at small launches, up to 0.75 at mega
+    launches, where the residuals are wider).
     """
     rows_out = []
     for hour in range(2, 25):
@@ -613,7 +634,7 @@ def _blend_rows(leg_rows, weights):
         med_log = blended[2]
         final = []
         for v in blended:
-            q = math.exp(med_log + (v - med_log) * BLEND_SPREAD)
+            q = math.exp(med_log + (v - med_log) * spread)
             final.append(min(max(q, 1.0), 1e9))
         prev = 0.0
         clean = []
@@ -670,7 +691,8 @@ def forecast_case(case):
         rows4 = _build_rows(p1, comps, med4, spr4)
         w2d = _blend_weight_2d(p1, pre)
         wr = (1.0 - w2d) / 3.0
-        rows_out = _blend_rows([rows1, rows2, rows3, rows4], (w2d, wr, wr, wr))
+        rows_out = _blend_rows([rows1, rows2, rows3, rows4], (w2d, wr, wr, wr),
+                               _blend_spread(p1))
     else:
         # Too few usable comparables: fall back to the plain empirical
         # quantiles of the log-ratios, or flat persistence if even that
