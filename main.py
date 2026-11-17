@@ -122,23 +122,23 @@ half a log unit of slack), and the median never falls below the
 25th-percentile ratio curve of the biggest launches (a launch already
 near its peak in hour 1 does not shrink).
 
-Measured on the four practice launches: mean loss 0.133 (p00 0.132,
-p01 0.117, p02 0.091, p03 0.191), typical miss 21.0%, 90% coverage
-0.86. In a final-like simulation -- each practice launch forecast with
+Measured on the four practice launches: mean loss 0.135 (p00 0.128,
+p01 0.132, p02 0.099, p03 0.181), typical miss 21.8%, 90% coverage
+0.89. In a final-like simulation -- each practice launch forecast with
 the other three practice launches added to its training set, the way
 the real final's 42 comparables include all four -- the mean loss is
-0.130. Those two numbers are measured on launches far smaller than
+0.132. Those two numbers are measured on launches far smaller than
 the final, so they understate what matters: in a mega final-like
 simulation -- each of the six biggest comparables (hour-1 >= 300,000)
 forecast with the other 36 plus all four practice launches as its
-training set -- the mean loss is 0.093, below the leaderboard leader's
-0.110. Four steps got it there. The flatness rule: when a launch's
+training set -- the mean loss is 0.083, below the leaderboard leader's
+0.110. Five steps got it there. The flatness rule: when a launch's
 pre-release audience is already large relative to hour-1, its release
 day is not a fresh launch, so the median is pulled toward persistence
 -- Diablo IV's loss falls 0.190 to 0.071, and the mean excluding it is
-0.098 (Hogwarts Legacy, a decline-then-rise rather than a flat day,
+0.085 (Hogwarts Legacy, a decline-then-rise rather than a flat day,
 was the rule's honest cost at rev8, 0.157 to 0.179; the wider kernel,
-the median shift and the shape-aware flatness bring it back to 0.130).
+the median shift and the shape-aware flatness bring it back to 0.129).
 The wider similarity kernel (2.25 in log hour-1, 2.0 in log
 pre-release) and a half-strength per-hour median-bias correction (the
 model over-forecasts the unlock-step hours by ~0.2 log and
@@ -150,13 +150,16 @@ toward the launch's own pre-release daily shape instead of flat 0
 move it further to 0.095, the wider 16 big launches to 0.208, and
 the practice mean to 0.136 with the final-like mean to 0.132; a
 platform kernel on the 2-D leg (comparables whose launch platform
-class differs from the target's are downweighted by 0.044 -- GTA VI
-launches console-only while most mega comparables are PC-inclusive)
-moves it to 0.093, the wider 16 to 0.206, the practice mean to 0.133
-and the final-like mean to 0.130. On the four
-low-pre-release mega launches most like the final (ELDEN RING 0.069,
-Cyberpunk 2077 0.086, Elden Ring Nightreign 0.089, The Last of Us
-Part II 0.116) the mean is 0.090, below the leaderboard leader's
+class differs from the target's are downweighted by 0.082 at bw 0.5
+-- GTA VI launches console-only while most mega comparables are
+PC-inclusive), a re-derived per-hour shift and spread multipliers,
+and a lower blend hinge (150,000 hour-1 viewers, down from 300,000
+-- with the platform kernel the 2-D view is trustworthy at lower
+hour-1) move it to 0.083, the wider 16 big launches to 0.184, and
+the practice mean to 0.135 with the final-like mean to 0.132. On the four
+low-pre-release mega launches most like the final (ELDEN RING 0.066,
+Cyberpunk 2077 0.083, Elden Ring Nightreign 0.064, The Last of Us
+Part II 0.083) the mean is 0.074, below the leaderboard leader's
 0.110. The final's own
 pre-release level, read from its public category data on 2026-11-17,
 is ~850 viewers (7-day median, rising from ~150 a week earlier) --
@@ -207,24 +210,29 @@ PRE_WINDOW_DAYS = 7
 # gives 0.1220 at the 0.3 logistic scale, practice 0.1353, coverage 0.89).
 BLEND_W2D_LO = 0.25
 BLEND_W2D_HI = 1.0
-HINGE_H1 = 300000.0
+# (rev12: 300000 -> 150000. With the platform kernel the 2-D view is
+# trustworthy at lower hour-1, so the hinge can move down: the mega
+# mean falls 0.0867 -> 0.0828 and the wider 16 fall 0.2044 -> 0.1844,
+# while practice/final-like move only +0.002. Below 150k the mega
+# mean is flat (0.0826 at 100k) and only mid launches improve --
+# the final is a mega launch, so 150k is where it stops.)
+HINGE_H1 = 150000.0
 HINGE_PRE = 20000.0
 BLEND_SCALE = 0.3
 BLEND_SPREAD_LO = 0.6
 BLEND_SPREAD_HI = 0.75
-# Per-hour spread multipliers (rev7): the residual scale is not the
-# same at every hour -- the early-morning dip and the midday hours
-# vary more across launches than the evening peak does. Measured as
-# the per-hour residual sd of this model on the six biggest launches,
-# simulated as the final case, divided by the mean sd across hours,
-# shrunk 0.75 toward 1 and clamped to [0.8, 1.25] so no single hour
-# can dominate. The multipliers are fixed constants, not fitted at
-# run time, so the entry stays deterministic.
+# Per-hour spread multipliers (rev12): re-derived from the bw=0.5
+# platform-kernel model's per-hour residual sd on the six biggest
+# launches, shrunk 0.75 toward 1 and clamped to [0.8, 1.25]. The
+# multipliers are fixed constants, not fitted at run time, so the
+# entry stays deterministic. (Re-deriving again at the hinge-150k
+# base does not stack -- mega 0.0830 vs 0.0828 -- so these stand.)
 SPREAD_HOUR_MULT = {
-    2: 0.904, 3: 1.170, 4: 1.250, 5: 0.803, 6: 1.001, 7: 1.010,
-    8: 0.919, 9: 1.089, 10: 1.065, 11: 1.080, 12: 1.179, 13: 1.130,
-    14: 1.118, 15: 1.110, 16: 0.863, 17: 0.985, 18: 0.927, 19: 0.994,
-    20: 0.940, 21: 0.860, 22: 0.800, 23: 0.800, 24: 1.050,
+    2: 1.0034, 3: 1.25, 4: 1.25, 5: 1.0235, 6: 0.9619, 7: 1.1,
+    8: 0.962, 9: 1.1312, 10: 1.0973, 11: 1.106, 12: 1.0915,
+    13: 0.9773, 14: 0.9127, 15: 0.9176, 16: 0.8708, 17: 0.9885,
+    18: 0.848, 19: 0.8023, 20: 0.8, 21: 0.8, 22: 0.8, 23: 0.9422,
+    24: 1.1986,
 }
 KNN_K = 8                # nearest launches in the neighbour view
 BIG_H1 = 200000.0        # a "big" launch, for the median floor
@@ -255,28 +263,34 @@ FLATNESS_K = 0.4
 SHAPE_SHRINK = 0.3
 # Platform kernel (rev11): the 2-D similarity leg downweights
 # comparables whose launch platform class (PC at launch or not)
-# differs from the target's, by exp(-0.5 / PLATFORM_BW**2) ~= 0.044.
+# differs from the target's, by exp(-0.5 / PLATFORM_BW**2).
 # GTA VI launches console-only, like the practice targets, while
 # most mega comparables are PC-inclusive; without this the 2-D fit
-# for a console-only target is pulled by PC launch shapes. bw 0.4
-# is the smooth optimum (0.5 -> 0.0903, 0.6 -> 0.0921, 1.0 ->
-# 0.0938, no kernel -> 0.0946); 0.3 collapses (TLOU 0.271) -- the
-# console-only sample (9 of 38) is too small that far.
-PLATFORM_BW = 0.4
-# Median shift (rev9): the model has a small systematic per-hour bias
-# on the six biggest launches in the final-like simulation -- it
-# over-forecasts the unlock-step hours (hour 6-8 mean residual -0.21,
-# -0.23, -0.16 log) and under-forecasts the evening peak (+0.07 at
-# hour 17). The shift is half that per-hour mean residual (shrunk
-# 0.5, so no hour moves more than 0.11 log), a fixed constant, not
-# fitted at run time. It is a bias correction, not a feature: the
-# same shift is checked on the wider 16 big launches, where it also
-# helps (0.2110 -> 0.2103), so it is not fitted to the six alone.
+# for a console-only target is pulled by PC launch shapes. bw 0.5
+# is the smooth optimum on the corrected sweep (0.4 -> 0.0936,
+# 0.6 -> 0.0908, 1.0 -> 0.0932, no kernel -> 0.0946); 0.3 collapses
+# (TLOU 0.259) -- the console-only sample (9 of 38) is too small
+# that far. (The first sweep said 0.4, but it was measured with
+# the synth practice comps' platform flag wrongly set to PC;
+# corrected, 0.5 wins.)
+PLATFORM_BW = 0.5
+# Median shift (rev12): re-derived from the bw=0.5 platform-kernel
+# model's per-hour mean residual on the six biggest launches in the
+# final-like simulation. The model still over-forecasts the
+# unlock-step hours (hour 6-7 mean residual -0.20, -0.20 log) and
+# under-forecasts the evening peak (+0.03 at hour 17). The shift is
+# half that per-hour mean residual (shrunk 0.5, so no hour moves
+# more than 0.10 log), a fixed constant, not fitted at run time.
+# It is a bias correction, not a feature: the shift+mult pair is
+# adopted on the mega mean (0.0879 -> 0.0867) at a small wider-16
+# cost (0.2040 -> 0.2044, inside the 0.001 bound), so it is not
+# fitted to the six alone.
 MEDIAN_SHIFT = {
-    2: 0.007, 3: 0.008, 4: 0.020, 5: -0.032, 6: -0.106, 7: -0.113,
-    8: -0.081, 9: -0.052, 10: -0.039, 11: -0.028, 12: -0.002,
-    13: 0.008, 14: 0.015, 15: 0.021, 16: 0.019, 17: 0.036, 18: 0.031,
-    19: 0.032, 20: 0.022, 21: 0.021, 22: 0.016, 23: 0.014, 24: -0.015,
+    2: -0.0053, 3: -0.0105, 4: -0.0017, 5: -0.0193, 6: -0.0975,
+    7: -0.1021, 8: -0.0651, 9: -0.0441, 10: -0.0338, 11: -0.0251,
+    12: -0.0081, 13: -0.0037, 14: 0.0009, 15: 0.0027, 16: 0.0021,
+    17: 0.0086, 18: -0.0022, 19: -0.004, 20: -0.0144, 21: -0.0143,
+    22: -0.0166, 23: -0.0222, 24: -0.0508,
 }
 
 
