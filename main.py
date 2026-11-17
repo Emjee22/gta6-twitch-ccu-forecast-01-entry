@@ -427,7 +427,12 @@ def _median(values):
     mid = n // 2
     if n % 2:
         return float(ordered[mid])
-    return (ordered[mid - 1] + ordered[mid]) / 2.0
+    return ordered[mid - 1] + (ordered[mid] - ordered[mid - 1]) / 2.0
+
+
+def _exp(x):
+    # Overflow-safe exp (BQ): clamp arg.
+    return math.exp(min(x, 700.0))
 
 
 def _num(v):
@@ -525,7 +530,10 @@ def _enrich_comp(comp):
             by_hour[h] = math.exp((math.log(by_hour[h - 1]) + math.log(by_hour[h + 1])) / 2.0)
     if len(by_hour) < 24:
         return None, 0.0, 0
-    return [by_hour[h] for h in range(1, 25)], _median(pre_vals), c1
+    curve = [by_hour[h] for h in range(1, 25)]
+    if max(curve) / min(curve) > 1e300:
+        return None, 0.0, 0
+    return curve, _median(pre_vals), c1
 
 
 def _release_day_curve(comp):
@@ -873,9 +881,9 @@ def _build_rows(p1, comps, med, spr):
     rows_out = []
     for hour in range(2, 25):
         spread = min(max(spr[hour] * SPREAD_FACTOR, MIN_SPREAD), MAX_SPREAD)
-        quants = [p1 * math.exp(med[hour] + z * spread) for z in Z_VALUES]
+        quants = [p1 * _exp(med[hour] + z * spread) for z in Z_VALUES]
         if hour in floor:
-            f = math.exp(floor[hour])
+            f = _exp(floor[hour])
             quants[0] = max(quants[0], p1 * f * 0.7)
             quants[1] = max(quants[1], p1 * f * 0.85)
             quants[2] = max(quants[2], p1 * f)
@@ -911,7 +919,7 @@ def _blend_weight_2d(p1, pre):
     BLEND_W2D_HI. The other three views share the rest equally.
     """
     s_h = 1.0 / (1.0 + math.exp(-(math.log(p1) - math.log(HINGE_H1)) / BLEND_SCALE))
-    s_p = 1.0 / (1.0 + math.exp(-(math.log(HINGE_PRE) - math.log(max(pre, 1.0))) / BLEND_SCALE))
+    s_p = 1.0 / (1.0 + _exp(-(math.log(HINGE_PRE) - math.log(max(pre, 1.0))) / BLEND_SCALE))
     return BLEND_W2D_LO + (BLEND_W2D_HI - BLEND_W2D_LO) * s_h * s_p
 
 
@@ -944,10 +952,9 @@ def _target_is_pc(case):
 def _pre_release_shape(history_hourly, day_start):
     """Mean daily shape of the 7 pre-release days.
 
-    For each UTC hour h, the mean over the pre-release days of
-    log(viewers at h / viewers at UTC 0 that day). Days whose
-    UTC-0 reading is not positive are skipped; with no usable day
-    every hour is 0.0 (flat), which is the rev8 behaviour.
+    Per UTC hour h, the mean over those days of log(viewers at h /
+    viewers at UTC 0 that day). Days with a non-positive UTC-0
+    reading are skipped; with no usable day every hour is 0.0.
     """
     by_day = {}
     for point in _dp(history_hourly):
@@ -963,7 +970,7 @@ def _pre_release_shape(history_hourly, day_start):
         for d in days:
             v0 = by_day[d].get(0, 0.0)
             if v0 > 0:
-                vals.append(math.log(max(by_day[d].get(h, 0.0), 1.0) / v0))
+                vals.append(math.log(min(max(by_day[d].get(h, 0.0), 1.0) / v0, 1e300)))
         shape[h] = sum(vals) / len(vals) if vals else 0.0
     return shape
 
@@ -981,16 +988,15 @@ def _dip_depth(history_hourly, day_start):
 
 
 def _flatness_factor(p1, pre):
-    """How much to flatten the forecast shape toward persistence.
+    """Flatten the forecast shape toward persistence.
 
-    r = pre / hour-1 measures how much of hour-1's audience was
-    already watching before release. At r ~ 0.001 (a fresh launch)
-    the factor is 1.0 and the forecast is untouched; at r = 0.56
-    (Diablo IV) it is 0.20. Quadratic in r so the transition is
-    gentle near ordinary launches and firm only for the huge-pre
-    regime, where the release day is not a launch at all.
+    r = pre / hour-1: how much of hour-1's audience was already
+    watching. r ~ 0.001 (fresh launch) -> factor 1.0 (untouched);
+    r = 0.56 (Diablo IV) -> 0.20. Quadratic in r: gentle near
+    ordinary launches, firm only for huge-pre launches.
     """
     r = pre / max(p1, 1.0)
+    r = min(r, 1e150)
     return 1.0 / (1.0 + (r / FLATNESS_K) ** 2)
 
 
@@ -1038,7 +1044,7 @@ def _blend_rows(leg_rows, weights, spread, shift_damp=1.0):
         sp = spread * SPREAD_HOUR_MULT.get(hour, 1.0)
         final = []
         for v in blended:
-            q = math.exp(med_log + (v - med_log) * sp)
+            q = _exp(med_log + (v - med_log) * sp)
             final.append(min(max(q, 1.0), 1e9))
         prev = 0.0
         clean = []
@@ -1380,7 +1386,7 @@ def forecast_case(case):
                 quants = []
                 prev = 0.0
                 for level in LEVELS:
-                    q = p1 * math.exp(_quantile(ratios, level))
+                    q = p1 * _exp(_quantile(ratios, level))
                     q = min(max(q, 1.0), 1e9)
                     if q < prev:
                         q = prev
@@ -1407,7 +1413,7 @@ def forecast_case(case):
             med_log = math.log(max(qs[2], 1e-9) / p1)
             target = SHAPE_SHRINK * shape.get(row["hour"] - 1, 0.0)
             s = (1.0 - f) * (target - med_log)
-            nq = [round(min(max(q * math.exp(s), 1.0), 1e9), 2) for q in qs]
+            nq = [round(min(max(q * _exp(s), 1.0), 1e9), 2) for q in qs]
             prev = 0.0
             clean = []
             for q in nq:
@@ -1432,8 +1438,11 @@ def main(argv):
     names = sorted(n for n in os.listdir(in_dir) if n.endswith(".in"))
     for name in names:
         stem = name[:-3]
-        with open(os.path.join(in_dir, name), "r", encoding="utf-8") as fh:
-            case = json.load(fh)
+        try:
+            with open(os.path.join(in_dir, name), "r", encoding="utf-8") as fh:
+                case = json.load(fh)
+        except Exception:
+            case = {}
         result = forecast_case(case)
         text = json.dumps(result, separators=(",", ":"))
         with open(os.path.join(out_dir, stem + ".out"), "w", encoding="utf-8") as fh:
