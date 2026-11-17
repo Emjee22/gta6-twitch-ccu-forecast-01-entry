@@ -439,7 +439,7 @@ def _num(v):
 
 
 def _dp(ps):
-    return [p for p in ps or [] if isinstance(p, dict)]
+    return [p for p in ps if isinstance(p, dict)] if isinstance(ps, (list, tuple)) else []
 
 
 def _quantile(values, q):
@@ -1165,7 +1165,7 @@ def _apply_final_only(case, day_start, p1, rows_out):
             trend_adj = max(-0.05, min(0.05, slope * 60.0))
     # 2. stream concentration
     spread_mult = 1.0
-    streams = [s for s in case.get("streams") or [] if isinstance(s, dict)]
+    streams = _dp(case.get("streams"))
     if streams:
         top1 = 0.0
         for st in streams:
@@ -1200,10 +1200,10 @@ def _apply_final_only(case, day_start, p1, rows_out):
             fresh_adj = max(-0.015, min(0.015, 0.03 * (frac_fresh - 0.5)))
     # 3. category share
     cat_adj = 0.0
-    cats = [c for c in case.get("categories_hourly") or [] if isinstance(c, dict)]
+    cats = _dp(case.get("categories_hourly"))
     if cats:
         last = cats[-1] or {}
-        top = [e for e in last.get("top") or [] if isinstance(e, dict)]
+        top = _dp(last.get("top"))
         gname = (case.get("game") if isinstance(case.get("game"), dict) else {}).get("name") or "Grand Theft Auto VI"
         total = 0.0
         gta = None
@@ -1222,7 +1222,7 @@ def _apply_final_only(case, day_start, p1, rows_out):
     # Read from the case, not hardcoded.
     ceiling = None
     for comp in _dp(case.get("comparables")):
-        if "Grand Theft Auto VI" in (comp.get("name") or ""):
+        if "Grand Theft Auto VI" in str(comp.get("name") or ""):
             peak = 0.0
             for p in _dp(comp.get("hourly")):
                 v = _num(p.get("viewers"))
@@ -1336,7 +1336,7 @@ def forecast_case(case):
         dip_c = _dip_depth(comp.get("hourly"), c_day) if c_day else 0.0
         comps.append({"h1": float(curve[0]), "pre": c_pre, "curve": curve,
                       "step": _detect_unlock_hour(curve),
-                      "pc": "PC" in (comp.get("platforms") or ""),
+                      "pc": "PC" in str(comp.get("platforms") or ""),
                       "vpc": vpc_c, "dip": dip_c})
     # Comparables without hour-1 channels take the target's vpc
     # (only when the target has one -- otherwise they stay None and
