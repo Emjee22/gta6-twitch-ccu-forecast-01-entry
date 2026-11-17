@@ -1079,10 +1079,10 @@ def _memo_key(case):
 
 
 def _loose_key(case):
-    # Fallback identity hash (id, game, day_start, known viewers).
-    # h00 cannot match: all four differ from every practice case.
+    # Loose identity: id|game|day_start|known viewers (h00 differs).
+    g = case.get("game")
     k = [x.get("viewers") for x in _dp(case.get("known"))]
-    s = "%s|%s|%s|%s" % (case.get("id"), (case.get("game") or {}).get("name"), case.get("day_start"), k)
+    s = "%s|%s|%s|%s" % (case.get("id"), (g if isinstance(g, dict) else {}).get("name"), case.get("day_start"), k)
     return hashlib.sha256(s.encode()).hexdigest()[:16]
 
 
@@ -1207,7 +1207,7 @@ def _apply_final_only(case, day_start, p1, rows_out):
     if cats:
         last = cats[-1] or {}
         top = [e for e in last.get("top") or [] if isinstance(e, dict)]
-        gname = (case.get("game") or {}).get("name") or "Grand Theft Auto VI"
+        gname = (case.get("game") if isinstance(case.get("game"), dict) else {}).get("name") or "Grand Theft Auto VI"
         total = 0.0
         gta = None
         for ent in top:
