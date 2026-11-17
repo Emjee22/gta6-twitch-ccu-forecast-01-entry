@@ -117,8 +117,8 @@ half a log unit of slack), and the median never falls below the
 25th-percentile ratio curve of the biggest launches (a launch already
 near its peak in hour 1 does not shrink).
 
-Measured on the four practice launches: mean loss 0.1365 (p00 0.133,
-p01 0.124, p02 0.098, p03 0.191), typical miss 24.4%, 90% coverage
+Measured on the four practice launches: mean loss 0.1353 (p00 0.133,
+p01 0.119, p02 0.097, p03 0.193), typical miss 21.5%, 90% coverage
 0.89. In a final-like simulation -- each practice launch forecast with
 the other three practice launches added to its training set, the way
 the real final's 42 comparables include all four -- the mean loss is
@@ -128,8 +128,8 @@ simulation -- each of the six biggest comparables (hour-1 >= 300,000)
 forecast with the other 36 plus all four practice launches as its
 training set -- the mean loss is 0.122, and 0.107 excluding Diablo IV
 (the huge-pre-release outlier). On the four low-pre-release mega
-launches most like the final (ELDEN RING 0.058, Cyberpunk 2077 0.104,
-Elden Ring Nightreign 0.133, The Last of Us Part II 0.084) the mean is
+launches most like the final (ELDEN RING 0.059, Cyberpunk 2077 0.101,
+Elden Ring Nightreign 0.130, The Last of Us Part II 0.089) the mean is
 0.095, below the leaderboard leader's 0.110. The final's own
 pre-release level, read from its public category data on 2026-11-17,
 is ~700 viewers (7-day median, rising from ~150 a week earlier) --
@@ -168,14 +168,13 @@ PRE_WINDOW_DAYS = 7
 # launches, widening toward BLEND_SPREAD_HI as hour-1 viewers pass
 # HINGE_H1. Big launches deviate further from any median in absolute
 # log terms, so their intervals earn the extra width (measured on the
-# six biggest launches, simulated as the final case: spread 0.6
-# gives 0.1255, adaptive 0.6->0.75 gives 0.1223, practice unchanged
-# at 0.1365, coverage 0.89).
+# six biggest launches, simulated as the final case: adaptive 0.6->0.75
+# gives 0.1220 at the 0.3 logistic scale, practice 0.1353, coverage 0.89).
 BLEND_W2D_LO = 0.25
 BLEND_W2D_HI = 1.0
 HINGE_H1 = 300000.0
 HINGE_PRE = 20000.0
-BLEND_SCALE = 0.5
+BLEND_SCALE = 0.3
 BLEND_SPREAD_LO = 0.6
 BLEND_SPREAD_HI = 0.75
 KNN_K = 8                # nearest launches in the neighbour view
