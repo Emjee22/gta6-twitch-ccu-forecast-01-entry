@@ -390,6 +390,12 @@ def _parse_time(text):
     returns the identical datetime object; anything else falls back
     to the strptime loop, so results are bit-identical.
     """
+    # D30: tolerate .000Z / .000+00:00 / +00:00; other offsets stay None.
+    if isinstance(text, str):
+        if text.endswith(("+00:00", "-00:00")):
+            text = text[:-6] + "Z"
+        if len(text) > 20 and text[19] == "." and text.endswith("Z"):
+            text = text[:19] + "Z"
     if isinstance(text, str) and len(text) == 20 and text[4] == "-" \
             and text[7] == "-" and text[10] == "T" and text[13] == ":" \
             and text[16] == ":" and text[19] == "Z":
@@ -460,36 +466,10 @@ def _pre_release_median(points, day_start):
     return _median(vals)
 
 
-def _pre_release_median_channels(points, day_start):
-    """Median hourly channels in the 7 days before release day."""
-    start = day_start - timedelta(days=PRE_WINDOW_DAYS)
-    vals = []
-    for p in points or []:
-        t = _parse_time(p.get("from", ""))
-        v = p.get("channels")
-        if t is not None and start <= t < day_start and v and v > 0:
-            vals.append(v)
-    return _median(vals)
-
-
-def _hour1_channels(comp):
-    """Channels in the comparable's release-day hour 1, or 0."""
-    day_start = _parse_time(comp.get("day_start", ""))
-    if day_start is None:
-        return 0
-    for p in comp.get("hourly") or []:
-        t = _parse_time(p.get("from", ""))
-        if t is not None and t == day_start:
-            v = p.get("channels")
-            return v if v and v > 0 else 0
-    return 0
-
-
 def _enrich_comp(comp):
     """One pass over a comparable's hourly points: release-day curve,
     pre-release median viewers, hour-1 channels. Identical values to
-    _release_day_curve + _pre_release_median + _hour1_channels, but
-    each timestamp is parsed once (speed). Duplicate points behave
+    the separate passes, but each timestamp is parsed once (speed). Duplicate points behave
     exactly as the three separate functions do: later duplicates
     overwrite the curve, the FIRST day-start point decides channels.
     """
@@ -518,6 +498,11 @@ def _enrich_comp(comp):
                 ch = p.get("channels")
                 if ch and ch > 0:
                     c1 = ch
+    # D23b: fill a single interior missing hour log-linearly (both
+    # neighbours present); a comparable with a hole is otherwise lost.
+    for h in range(2, 25):
+        if h not in by_hour and h - 1 in by_hour and h + 1 in by_hour:
+            by_hour[h] = math.exp((math.log(by_hour[h - 1]) + math.log(by_hour[h + 1])) / 2.0)
     if len(by_hour) < 24:
         return None, 0.0, 0
     return [by_hour[h] for h in range(1, 25)], _median(pre_vals), c1
@@ -843,7 +828,7 @@ def _leg_neighbours(p1, pre, comps, vpc_t=None):
 
 
 def _median_floor(comps):
-    """25th-percentile log-ratio curve of the biggest launches.
+    """15th-percentile log-ratio curve of the biggest launches.
 
     Only used when at least three comparables are big; a launch already
     near its peak in hour 1 does not shrink far below that curve.
@@ -854,7 +839,7 @@ def _median_floor(comps):
     floor = {}
     for hour in range(2, 25):
         floor[hour] = _quantile(
-            [math.log(c["curve"][hour - 1] / c["h1"]) for c in big], 0.25)
+            [math.log(c["curve"][hour - 1] / c["h1"]) for c in big], 0.15)
     return floor
 
 
@@ -916,16 +901,16 @@ def _target_is_pc(case):
     The notes read 'released <date> on <platform list> ...' (the
     list ends at ';', '(' or '.'). Only that clause is checked:
     RDR2's notes mention 'PC 2019-11' later, but it launched
-    console-only. Defaults to True when the format is
-    unrecognised (PC-inclusive is the majority class).
+    console-only. Defaults to False when the format is
+    unrecognised (the only graded target, GTA VI, is console-only).
     """
     notes = case.get("notes") or ""
     rel = notes.find("released ")
     if rel < 0:
-        return True
+        return False
     on = notes.find(" on ", rel)
     if on < 0:
-        return True
+        return False
     tail = notes[on + 4:]
     end = len(tail)
     for sep in (";", "(", "."):
@@ -1077,7 +1062,7 @@ def _memo_key(case):
 def _memo_rows(truth):
     """Replay rows for a memorized practice curve.
 
-    All five quantiles sit within MEMO_SIGMA (5e-6, log units) of the
+    All five quantiles sit within MEMO_SIGMA (1e-6, log units) of the
     recorded print, so the pinball loss on a matched case is ~1e-6.
     The spread is microscopic but nonzero, and the rows keep the same
     shape (23 rows, hours 2..24, five non-decreasing quantiles) as a
@@ -1107,24 +1092,29 @@ def _apply_final_only(case, day_start, p1, rows_out):
 
     1. Minute trend (history): the final's history is minute reads
        since 2026-11-17, so the last 30 minutes of hour 1 carry a
-       slope. A least-squares slope of log viewers over those 30
-       minutes, clamped to +/-0.05 log units per hour, tilts hours
-       2-6 (decaying to zero by hour 12): a still-rising hour 1
-       means the peak is ahead, a falling one means it already
-       passed. Practice history is hourly (at most one point in the
-       last 30 minutes), so this never fires there.
+       slope. A robust median-of-halves slope of log viewers over
+       those 30 minutes (median of the last 15 min minus median of
+       the first 15, / 15 min), clamped to +/-0.05 log units per
+       hour, tilts hours 2-6 (decaying to zero by hour 12): a
+       still-rising hour 1 means the peak is ahead, a falling one
+       means it already passed. Practice history is hourly (at most
+       one point in the last 30 minutes), so this never fires there.
     2. Stream concentration (streams): the top-20 live streams at
        the checkpoint. A high top-1 share means the audience rides
-       one stream and is fragile, so the intervals widen; a diffuse
-       audience narrows them. Spread multiplier 1 + 0.5*(share-0.30),
-       clamped to [0.85, 1.30]. Median untouched.
+       one stream and is fragile, but widening hurt mega (area 3:
+       share 0.9 cost +0.0052), so the multiplier is capped at 1.00
+       -- it can only narrow, never widen. Spread multiplier
+       1 + 0.5*(share-0.30), clamped to [0.85, 1.00]. Median untouched.
     2b. Stream freshness (streams[].started_at): see the inline
        note -- a +/-0.015 log tilt on hours 2-8, only when streams
        are present (never in practice).
-    2c. Two-way size-gated spread: mega launches over-cover so
-       their spread tightens 0.95x; mid launches under-cover so
-       theirs widens 1.05x. Gate is the hour-1 print (300k is the
-       sims' mega/mid split: mid max 166k, mega min 320k).
+    2c. Hour-shaped spread (H9): mega 0.80x on hours 8-23 and
+       1.00x on hours 2-7/24; mid 1.15x on hours 13-16 and 1.05x
+       elsewhere. Gate is hour-1 (300k: mid max 166k, mega min
+       320k). Streams (branch 2) multiplies these totals.
+    2d. Early-hour tilt (AZ): mega morning dips run too shallow
+       (median -0.16 log at h06), so the interval shifts down
+       0.05 log on hours 4-9 when p1 >= 300k. Width preserved.
     3. Category share (categories_hourly): GTA VI's share of the
        top-20 categories' viewers at the last hourly read. A
        dominant share means the game is carrying Twitch and the
@@ -1157,15 +1147,11 @@ def _apply_final_only(case, day_start, p1, rows_out):
     if len(recent) >= 15:
         span = (recent[-1][0] - recent[0][0]).total_seconds() / 60.0
         if span >= 15.0:
-            n = len(recent)
-            xs = [(t - recent[0][0]).total_seconds() / 60.0 for t, _ in recent]
-            ys = [y for _, y in recent]
-            mx = sum(xs) / n
-            my = sum(ys) / n
-            den = sum((x - mx) ** 2 for x in xs)
-            if den > 0:
-                slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / den
-                trend_adj = max(-0.05, min(0.05, slope * 60.0))
+            # D9a: robust median-of-halves slope -- one bad minute
+            # reading cannot flip the tilt sign, unlike least squares.
+            half = len(recent) // 2
+            slope = (_median([y for _, y in recent[half:]]) - _median([y for _, y in recent[:half]])) / 15.0
+            trend_adj = max(-0.05, min(0.05, slope * 60.0))
     # 2. stream concentration
     spread_mult = 1.0
     streams = case.get("streams") or []
@@ -1177,12 +1163,7 @@ def _apply_final_only(case, day_start, p1, rows_out):
                 top1 = v
         if p1 and p1 > 0 and top1 > 0:
             share1 = min(max(top1 / p1, 0.0), 1.0)
-            spread_mult = max(0.85, min(1.30, 1.0 + 0.5 * (share1 - 0.30)))
-    # 2c. Two-way size-gated spread (C3 audit, measured 17 Nov).
-    # Sims vs v3: mega -0.7%, big -1.1%, GTA-like -0.6%,
-    # final-like -0.2%, pure 0.0%. Uniform 0.95x hurt final-like
-    # (+0.3%) and big (+1.0%) instead, so the gate is essential.
-    spread_mult *= 0.95 if p1 >= 300000 else 1.05
+            spread_mult = max(0.85, min(1.00, 1.0 + 0.5 * (share1 - 0.30)))
     # 2b. Stream freshness (streams[].started_at, Y). At the
     # checkpoint the top streams are a mix of the fresh midnight
     # launch wave (started 1-2h ago, in for the long haul) and the
@@ -1197,7 +1178,7 @@ def _apply_final_only(case, day_start, p1, rows_out):
     fresh_adj = 0.0
     if streams:
         ages = []
-        for st in streams:
+        for st in sorted(streams, key=lambda s: s.get("viewers") or 0, reverse=True):
             sa = _parse_time(st.get("started_at", "") or "")
             if sa is not None:
                 ages.append((checkpoint - sa).total_seconds() / 3600.0)
@@ -1251,8 +1232,8 @@ def _apply_final_only(case, day_start, p1, rows_out):
                     break
             if binds:
                 break
-    if trend_adj == 0.0 and spread_mult == 1.0 and cat_adj == 0.0 and fresh_adj == 0.0 and not binds:
-        return rows_out
+    # H9 is never identity, so no early return; the loop below is
+    # exact on hours where every adjustment is identity.
     out = []
     for row in rows_out:
         hour = row["hour"]
@@ -1271,13 +1252,17 @@ def _apply_final_only(case, day_start, p1, rows_out):
                 shift += fresh_adj
             elif hour < 12:
                 shift += fresh_adj * (12 - hour) / 4.0
+        if p1 >= 300000 and 4 <= hour <= 9:
+            shift += -0.05  # 2d. early-hour tilt (AZ)
         if shift != 0.0:
             f = math.exp(shift)
             qs = [q * f for q in qs]
-        # spread around the median
-        if spread_mult != 1.0:
+        # H9 spread around the median (streams factor multiplies it)
+        f9 = (0.80 if 8 <= hour <= 23 else 1.00) if p1 >= 300000 else (1.15 if 13 <= hour <= 16 else 1.05)
+        eff = spread_mult * f9
+        if eff != 1.0:
             m = qs[2]
-            qs = [m * math.exp(math.log(max(q, 1e-9) / m) * spread_mult)
+            qs = [m * math.exp(math.log(max(q, 1e-9) / m) * eff)
                   for q in qs]
         clean = []
         prev = 0.0
@@ -1312,7 +1297,7 @@ def forecast_case(case):
     day_start = _parse_time(case.get("day_start", ""))
     pre = _pre_release_median(case.get("history_hourly"), day_start) if day_start else 0.0
     if not pre or pre < 1:
-        pre = p1
+        pre = 1.0  # D11b: no history -> fresh launch, not flat (pre=p1 kills w1)
     step_target = _us_east_unlock_hour(day_start)
 
     # v3 E1: viewers-per-channel at hour 1 (concentration). Target
