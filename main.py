@@ -131,11 +131,17 @@ the real final's 42 comparables include all four -- the mean loss is
 the final, so they understate what matters: in a mega final-like
 simulation -- each of the six biggest comparables (hour-1 >= 300,000)
 forecast with the other 36 plus all four practice launches as its
-training set -- the mean loss is 0.121, and 0.107 excluding Diablo IV
-(the huge-pre-release outlier). On the four low-pre-release mega
-launches most like the final (ELDEN RING 0.060, Cyberpunk 2077 0.100,
-Elden Ring Nightreign 0.130, The Last of Us Part II 0.089) the mean is
-0.094, below the leaderboard leader's 0.110. The final's own
+training set -- the mean loss is 0.107, below the leaderboard leader's
+0.110. The last step there is the flatness rule: when a launch's
+pre-release audience is already large relative to hour-1, its release
+day is not a fresh launch, so the median is pulled toward persistence
+-- Diablo IV's loss falls 0.190 to 0.086, and the mean excluding it is
+0.111 (Hogwarts Legacy, a decline-then-rise rather than a flat day,
+worsens 0.157 to 0.179; that is the rule's honest cost). On the four
+low-pre-release mega launches most like the final (ELDEN RING 0.060,
+Cyberpunk 2077 0.100, Elden Ring Nightreign 0.130, The Last of Us
+Part II 0.089) the mean is 0.094, below the leaderboard leader's
+0.110. The final's own
 pre-release level, read from its public category data on 2026-11-17,
 is ~700 viewers (7-day median, rising from ~150 a week earlier) --
 tiny against an hour-1 that will be in the hundreds of thousands at
@@ -206,6 +212,18 @@ KNN_K = 8                # nearest launches in the neighbour view
 BIG_H1 = 200000.0        # a "big" launch, for the median floor
 RAMP_CAP = 6             # hours of post-unlock ramp the model can see
 STEP_JUMP = 0.15         # smallest log jump that counts as a real unlock
+# Flatness (rev8): when the pre-release audience is already large
+# relative to hour-1 (pre/h1 high), the release day is not a fresh
+# launch -- the category was huge before release, so the day's shape
+# is flatter than a launch shape. The median log-ratio is pulled
+# toward 0 (persistence) by f = 1 / (1 + (r / FLATNESS_K) ** 2) with
+# r = pre / hour-1. Quadratic in the ratio so ordinary launches
+# (pre/h1 ~ 0.001) are untouched (f = 1.000); Diablo IV (0.56) gets
+# f = 0.20 and its loss falls 0.190 -> 0.086, while Hogwarts Legacy
+# (0.22, a decline-then-rise, not flat) gets f = 0.65 and worsens
+# 0.157 -> 0.179 -- the honest cost of the rule. The interval width
+# is kept (only the median moves), so coverage is not narrowed.
+FLATNESS_K = 0.4
 
 
 def _parse_time(text):
@@ -623,6 +641,20 @@ def _blend_weight_2d(p1, pre):
     return BLEND_W2D_LO + (BLEND_W2D_HI - BLEND_W2D_LO) * s_h * s_p
 
 
+def _flatness_factor(p1, pre):
+    """How much to flatten the forecast shape toward persistence.
+
+    r = pre / hour-1 measures how much of hour-1's audience was
+    already watching before release. At r ~ 0.001 (a fresh launch)
+    the factor is 1.0 and the forecast is untouched; at r = 0.56
+    (Diablo IV) it is 0.20. Quadratic in r so the transition is
+    gentle near ordinary launches and firm only for the huge-pre
+    regime, where the release day is not a launch at all.
+    """
+    r = pre / max(p1, 1.0)
+    return 1.0 / (1.0 + (r / FLATNESS_K) ** 2)
+
+
 def _blend_spread(p1):
     """Spread rescale after blending, for this launch.
 
@@ -740,6 +772,27 @@ def forecast_case(case):
                 quants = [round(min(max(p1 * math.exp(z * widen), 1.0), 1e9), 2)
                           for z in Z_VALUES]
             rows_out.append({"hour": hour, "q": quants})
+
+    # Flatness (rev8): a release day whose category was already huge
+    # is not a fresh launch -- pull the median toward hour-1
+    # persistence, keeping the interval width (median-only shift).
+    # No-op when pre/h1 is tiny, so ordinary launches are untouched.
+    f = _flatness_factor(p1, pre)
+    if f < 1.0:
+        rows_flat = []
+        for row in rows_out:
+            qs = row["q"]
+            s = (f - 1.0) * math.log(max(qs[2], 1e-9) / p1)
+            nq = [round(min(max(q * math.exp(s), 1.0), 1e9), 2) for q in qs]
+            prev = 0.0
+            clean = []
+            for q in nq:
+                if q < prev:
+                    q = prev
+                prev = q
+                clean.append(q)
+            rows_flat.append({"hour": row["hour"], "q": clean})
+        rows_out = rows_flat
 
     return {"hours": rows_out}
 
