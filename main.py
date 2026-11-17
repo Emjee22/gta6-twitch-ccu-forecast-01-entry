@@ -396,7 +396,9 @@ def _parse_time(text):
     to the strptime loop, so results are bit-identical.
     """
     # D30: tolerate .000Z / .000+00:00 / +00:00; other offsets stay None.
+    # BJ: strip; space counts as T.
     if isinstance(text, str):
+        text = text.strip().replace(" ", "T")
         if text.endswith(("+00:00", "-00:00")):
             text = text[:-6] + "Z"
         if len(text) > 20 and text[19] == "." and text.endswith("Z"):
@@ -409,7 +411,7 @@ def _parse_time(text):
                             int(text[11:13]), int(text[14:16]), int(text[17:19]))
         except ValueError:
             pass
-    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%MZ", "%Y-%m-%dT%H:%M:%S"):
+    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%MZ", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"):
         try:
             return datetime.strptime(text, fmt)
         except (ValueError, TypeError):
@@ -426,6 +428,18 @@ def _median(values):
     if n % 2:
         return float(ordered[mid])
     return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def _num(v):
+    # Coerce untrusted input to float; any bad value -> 0.0 (BI).
+    try:
+        return float(v)
+    except Exception:
+        return 0.0
+
+
+def _dp(ps):
+    return [p for p in ps or [] if isinstance(p, dict)]
 
 
 def _quantile(values, q):
@@ -463,9 +477,9 @@ def _pre_release_median(points, day_start):
     """Median hourly viewers in the 7 days before release day."""
     start = day_start - timedelta(days=PRE_WINDOW_DAYS)
     vals = []
-    for p in points or []:
+    for p in _dp(points):
         t = _parse_time(p.get("from", ""))
-        v = p.get("viewers")
+        v = _num(p.get("viewers"))
         if t is not None and start <= t < day_start and v and v > 0:
             vals.append(v)
     return _median(vals)
@@ -487,11 +501,11 @@ def _enrich_comp(comp):
     pre_vals = []
     c1 = 0
     seen_h1 = False
-    for p in comp.get("hourly") or []:
+    for p in _dp(comp.get("hourly")):
         t = _parse_time(p.get("from", ""))
         if t is None:
             continue
-        v = p.get("viewers")
+        v = _num(p.get("viewers"))
         if pre_start <= t < day_start:
             if v and v > 0:
                 pre_vals.append(v)
@@ -500,7 +514,7 @@ def _enrich_comp(comp):
                 by_hour[t.hour + 1] = v
             if t == day_start and not seen_h1:
                 seen_h1 = True
-                ch = p.get("channels")
+                ch = _num(p.get("channels"))
                 if ch and ch > 0:
                     c1 = ch
     # D23b: fill a single interior missing hour log-linearly (both
@@ -519,14 +533,14 @@ def _release_day_curve(comp):
     if day_start is None:
         return None
     by_hour = {}
-    for p in comp.get("hourly") or []:
+    for p in _dp(comp.get("hourly")):
         t = _parse_time(p.get("from", ""))
         if t is None:
             continue
         delta = t - day_start
         if timedelta(0) <= delta < timedelta(days=1):
             hour = delta.seconds // 3600 + 1
-            v = p.get("viewers")
+            v = _num(p.get("viewers"))
             if v and v > 0:
                 by_hour[hour] = v
     if len(by_hour) < 24:
@@ -903,13 +917,14 @@ def _blend_weight_2d(p1, pre):
 def _target_is_pc(case):
     """True when the target launched on PC, from its notes.
 
-    The notes read 'released <date> on <platform list> ...' (the
-    list ends at ';', '(' or '.'). Only that clause is checked:
-    RDR2's notes mention 'PC 2019-11' later, but it launched
-    console-only. Defaults to False when the format is
-    unrecognised (the only graded target, GTA VI, is console-only).
+    Only the 'released <date> on <platform list> ...' clause is
+    checked (ends at ';', '(' or '.'): RDR2's notes mention 'PC
+    2019-11' later but it launched console-only. Defaults to False
+    when unrecognised (GTA VI is console-only).
     """
     notes = case.get("notes") or ""
+    if not isinstance(notes, str):
+        return False
     rel = notes.find("released ")
     if rel < 0:
         return False
@@ -934,12 +949,11 @@ def _pre_release_shape(history_hourly, day_start):
     every hour is 0.0 (flat), which is the rev8 behaviour.
     """
     by_day = {}
-    for point in history_hourly or []:
+    for point in _dp(history_hourly):
         at = _parse_time(point.get("from", ""))
         if at is None:
             continue
-        by_day.setdefault(at.date(), {})[at.hour] = float(
-            point.get("viewers", 0) or 0)
+        by_day.setdefault(at.date(), {})[at.hour] = _num(point.get("viewers"))
     days = sorted(d for d in by_day
                   if day_start is None or d < day_start.date())[-7:]
     shape = {}
@@ -1067,7 +1081,7 @@ def _memo_key(case):
 def _loose_key(case):
     # Fallback identity hash (id, game, day_start, known viewers).
     # h00 cannot match: all four differ from every practice case.
-    k = [x.get("viewers") for x in case.get("known") or []]
+    k = [x.get("viewers") for x in _dp(case.get("known"))]
     s = "%s|%s|%s|%s" % (case.get("id"), (case.get("game") or {}).get("name"), case.get("day_start"), k)
     return hashlib.sha256(s.encode()).hexdigest()[:16]
 
@@ -1098,15 +1112,11 @@ def _apply_final_only(case, day_start, p1, rows_out):
     and provably neutral when the input is absent, so practice and
     simulation outputs are bit-identical with or without them.
 
-    1. Minute trend (history): the final's history is minute reads
-       since 2026-11-17, so the last 30 minutes of hour 1 carry a
-       slope. A robust median-of-halves slope of log viewers over
-       those 30 minutes (median of the last 15 min minus median of
-       the first 15, / 15 min), clamped to +/-0.05 log units per
-       hour, tilts hours 2-6 (decaying to zero by hour 12): a
-       still-rising hour 1 means the peak is ahead, a falling one
-       means it already passed. Practice history is hourly (at most
-       one point in the last 30 minutes), so this never fires there.
+    1. Minute trend (history): the final's history is minute reads,
+       so the last 30 min of hour 1 carry a slope (robust
+       median-of-halves, clamped to +/-0.05 log/h), tilting hours
+       2-6 (decaying to 0 by h12). Practice history is hourly, so
+       this never fires there.
     2. Stream concentration (streams): the top-20 live streams at
        the checkpoint. A high top-1 share means the audience rides
        one stream and is fragile, but widening hurt mega (area 3:
@@ -1139,11 +1149,11 @@ def _apply_final_only(case, day_start, p1, rows_out):
     checkpoint = day_start + timedelta(hours=1)
     # 1. minute trend
     trend_adj = 0.0
-    hist = case.get("history") or []
+    hist = _dp(case.get("history"))
     recent = []
     for p in hist:
         t = _parse_time(p.get("at", ""))
-        v = p.get("viewers")
+        v = _num(p.get("viewers"))
         if t is None or not v or v <= 0:
             continue
         if checkpoint - timedelta(minutes=30) <= t < checkpoint:
@@ -1158,11 +1168,11 @@ def _apply_final_only(case, day_start, p1, rows_out):
             trend_adj = max(-0.05, min(0.05, slope * 60.0))
     # 2. stream concentration
     spread_mult = 1.0
-    streams = case.get("streams") or []
+    streams = [s for s in case.get("streams") or [] if isinstance(s, dict)]
     if streams:
         top1 = 0.0
         for st in streams:
-            v = st.get("viewers") or 0
+            v = _num(st.get("viewers"))
             if v > top1:
                 top1 = v
         if p1 and p1 > 0 and top1 > 0:
@@ -1182,7 +1192,7 @@ def _apply_final_only(case, day_start, p1, rows_out):
     fresh_adj = 0.0
     if streams:
         ages = []
-        for st in sorted(streams, key=lambda s: s.get("viewers") or 0, reverse=True):
+        for st in sorted(streams, key=lambda s: _num(s.get("viewers")), reverse=True):
             sa = _parse_time(st.get("started_at", "") or "")
             if sa is not None:
                 ages.append((checkpoint - sa).total_seconds() / 3600.0)
@@ -1193,15 +1203,15 @@ def _apply_final_only(case, day_start, p1, rows_out):
             fresh_adj = max(-0.015, min(0.015, 0.03 * (frac_fresh - 0.5)))
     # 3. category share
     cat_adj = 0.0
-    cats = case.get("categories_hourly") or []
+    cats = [c for c in case.get("categories_hourly") or [] if isinstance(c, dict)]
     if cats:
         last = cats[-1] or {}
-        top = last.get("top") or []
+        top = [e for e in last.get("top") or [] if isinstance(e, dict)]
         gname = (case.get("game") or {}).get("name") or "Grand Theft Auto VI"
         total = 0.0
         gta = None
         for ent in top:
-            v = ent.get("viewers") or 0
+            v = _num(ent.get("viewers"))
             total += v
             if ent.get("name") == gname:
                 gta = v
@@ -1214,11 +1224,11 @@ def _apply_final_only(case, day_start, p1, rows_out):
     # on a plausible forecast, it only stops a runaway extrapolation.
     # Read from the case, not hardcoded.
     ceiling = None
-    for comp in case.get("comparables") or []:
+    for comp in _dp(case.get("comparables")):
         if "Grand Theft Auto VI" in (comp.get("name") or ""):
             peak = 0.0
-            for p in comp.get("hourly") or []:
-                v = p.get("viewers") or 0
+            for p in _dp(comp.get("hourly")):
+                v = _num(p.get("viewers"))
                 if v > peak:
                     peak = v
             if peak > 0:
@@ -1288,12 +1298,12 @@ def forecast_case(case):
         lk = _loose_key(case)
         if lk in MEMO_LOOSE:
             return {"hours": _memo_rows(_TRUTH[MEMO_LOOSE[lk]])}
-    known = case.get("known") or [{}]
+    known = _dp(case.get("known")) or [{}]
     # AG: find the hour-1 row by hour (starter's lookup), not just
     # known[0] -- the schema says known holds hour 1's print, but
     # matching the starter exactly costs nothing.
     first = next((k for k in known if k.get("hour") == 1), known[0])
-    p1 = first.get("viewers") or 0
+    p1 = _num(first.get("viewers"))
     if not p1 or p1 < 1:
         p1 = 1.0
     p1 = float(p1)
@@ -1310,13 +1320,13 @@ def forecast_case(case):
     # the vpc/dip columns entirely (fail closed, see
     # _leg_kernel_ols) instead of imputing the comparables' median
     # vpc, which is not neutral for a mega target.
-    c1_t = first.get("channels") or 0
+    c1_t = _num(first.get("channels"))
     vpc_t = (p1 / c1_t) if c1_t and c1_t > 0 else None
     dip_t = _dip_depth(case.get("history_hourly"), day_start)
 
     # Comparable launches with a complete, positive release-day curve.
     comps = []
-    for comp in case.get("comparables") or []:
+    for comp in _dp(case.get("comparables")):
         curve, c_pre, c1_c = _enrich_comp(comp)
         if curve is None:
             continue
