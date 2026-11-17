@@ -122,34 +122,36 @@ half a log unit of slack), and the median never falls below the
 25th-percentile ratio curve of the biggest launches (a launch already
 near its peak in hour 1 does not shrink).
 
-Measured on the four practice launches: mean loss 0.141 (p00 0.127,
-p01 0.121, p02 0.134, p03 0.183), typical miss 22.8%, 90% coverage
+Measured on the four practice launches: mean loss 0.136 (p00 0.121,
+p01 0.119, p02 0.117, p03 0.188), typical miss 21.7%, 90% coverage
 0.91. In a final-like simulation -- each practice launch forecast with
 the other three practice launches added to its training set, the way
 the real final's 42 comparables include all four -- the mean loss is
-0.136. Those two numbers are measured on launches far smaller than
+0.132. Those two numbers are measured on launches far smaller than
 the final, so they understate what matters: in a mega final-like
 simulation -- each of the six biggest comparables (hour-1 >= 300,000)
 forecast with the other 36 plus all four practice launches as its
-training set -- the mean loss is 0.099, below the leaderboard leader's
-0.110. Two steps got it there. The flatness rule: when a launch's
+training set -- the mean loss is 0.095, below the leaderboard leader's
+0.110. Three steps got it there. The flatness rule: when a launch's
 pre-release audience is already large relative to hour-1, its release
 day is not a fresh launch, so the median is pulled toward persistence
--- Diablo IV's loss falls 0.190 to 0.086, and the mean excluding it is
-0.102 (Hogwarts Legacy, a decline-then-rise rather than a flat day,
-was the rule's honest cost at rev8, 0.157 to 0.179; the wider kernel
-and the median shift bring it back to 0.146). The wider
-similarity kernel (2.25 in log hour-1, 2.0 in log pre-release) and a
-half-strength per-hour median-bias correction (the model over-forecasts
-the unlock-step hours by ~0.2 log and under-forecasts the evening
-peak): together they move the mega mean from 0.107 to 0.099 and the
-wider 16 big launches from 0.223 to 0.210, while the practice mean
-rises from 0.135 to 0.141 -- the wider kernel fits small launches
-worse, the price of fitting the mega regime, and the final-like mean
-is unchanged at 0.136. On the four
+-- Diablo IV's loss falls 0.190 to 0.071, and the mean excluding it is
+0.099 (Hogwarts Legacy, a decline-then-rise rather than a flat day,
+was the rule's honest cost at rev8, 0.157 to 0.179; the wider kernel,
+the median shift and the shape-aware flatness bring it back to 0.129).
+The wider similarity kernel (2.25 in log hour-1, 2.0 in log
+pre-release) and a half-strength per-hour median-bias correction (the
+model over-forecasts the unlock-step hours by ~0.2 log and
+under-forecasts the evening peak) move the mega mean from 0.107 to
+0.099; a stricter step threshold (only launches with a morning jump
+of 0.20 log count as genuine-step, so the step views are no longer
+diluted by marginal-step launches) and pulling the flatness target
+toward the launch's own pre-release daily shape instead of flat 0
+move it further to 0.095, the wider 16 big launches to 0.208, and
+the practice mean to 0.136 with the final-like mean to 0.132. On the four
 low-pre-release mega launches most like the final (ELDEN RING 0.062,
-Cyberpunk 2077 0.099, Elden Ring Nightreign 0.103, The Last of Us
-Part II 0.101) the mean is 0.091, below the leaderboard leader's
+Cyberpunk 2077 0.099, Elden Ring Nightreign 0.096, The Last of Us
+Part II 0.111) the mean is 0.092, below the leaderboard leader's
 0.110. The final's own
 pre-release level, read from its public category data on 2026-11-17,
 is ~700 viewers (7-day median, rising from ~150 a week earlier) --
@@ -222,7 +224,10 @@ SPREAD_HOUR_MULT = {
 KNN_K = 8                # nearest launches in the neighbour view
 BIG_H1 = 200000.0        # a "big" launch, for the median floor
 RAMP_CAP = 6             # hours of post-unlock ramp the model can see
-STEP_JUMP = 0.15         # smallest log jump that counts as a real unlock
+STEP_JUMP = 0.20         # smallest log jump that counts as a real unlock
+# (rev10: 0.15 diluted the step views with marginal-step launches;
+# 0.20 wins on all four metrics; 0.25 is identical — no launch has
+# its biggest h4..h9 jump in (0.20, 0.25])
 # Flatness (rev8): when the pre-release audience is already large
 # relative to hour-1 (pre/h1 high), the release day is not a fresh
 # launch -- the category was huge before release, so the day's shape
@@ -235,6 +240,14 @@ STEP_JUMP = 0.15         # smallest log jump that counts as a real unlock
 # 0.157 -> 0.179 -- the honest cost of the rule. The interval width
 # is kept (only the median moves), so coverage is not narrowed.
 FLATNESS_K = 0.4
+# Shape-aware flatness (rev10): the flatness pull targets the
+# launch's own pre-release daily shape, shrunk by SHAPE_SHRINK,
+# instead of flat 0. That shape correlates +0.82 (Diablo IV) and
+# +0.80 (Hogwarts Legacy) with the release-day shape but overstates
+# the evening rise ~3x, hence the shrink. For a dormant category
+# the shape is ~0 and this reduces to the rev8 flatness; for a
+# fresh launch (f = 1) the transform is the identity.
+SHAPE_SHRINK = 0.3
 # Median shift (rev9): the model has a small systematic per-hour bias
 # on the six biggest launches in the final-like simulation -- it
 # over-forecasts the unlock-step hours (hour 6-8 mean residual -0.21,
@@ -667,6 +680,34 @@ def _blend_weight_2d(p1, pre):
     return BLEND_W2D_LO + (BLEND_W2D_HI - BLEND_W2D_LO) * s_h * s_p
 
 
+def _pre_release_shape(history_hourly, day_start):
+    """Mean daily shape of the 7 pre-release days.
+
+    For each UTC hour h, the mean over the pre-release days of
+    log(viewers at h / viewers at UTC 0 that day). Days whose
+    UTC-0 reading is not positive are skipped; with no usable day
+    every hour is 0.0 (flat), which is the rev8 behaviour.
+    """
+    by_day = {}
+    for point in history_hourly or []:
+        at = _parse_time(point.get("from", ""))
+        if at is None:
+            continue
+        by_day.setdefault(at.date(), {})[at.hour] = float(
+            point.get("viewers", 0) or 0)
+    days = sorted(d for d in by_day
+                  if day_start is None or d < day_start.date())[-7:]
+    shape = {}
+    for h in range(24):
+        vals = []
+        for d in days:
+            v0 = by_day[d].get(0, 0.0)
+            if v0 > 0:
+                vals.append(math.log(max(by_day[d].get(h, 0.0), 1.0) / v0))
+        shape[h] = sum(vals) / len(vals) if vals else 0.0
+    return shape
+
+
 def _flatness_factor(p1, pre):
     """How much to flatten the forecast shape toward persistence.
 
@@ -799,16 +840,21 @@ def forecast_case(case):
                           for z in Z_VALUES]
             rows_out.append({"hour": hour, "q": quants})
 
-    # Flatness (rev8): a release day whose category was already huge
-    # is not a fresh launch -- pull the median toward hour-1
-    # persistence, keeping the interval width (median-only shift).
-    # No-op when pre/h1 is tiny, so ordinary launches are untouched.
+    # Flatness, shape-aware (rev10): a release day whose category was
+    # already huge is not a fresh launch -- pull the median toward the
+    # launch's own pre-release daily shape (shrunk), keeping the
+    # interval width (median-only shift). For a dormant category the
+    # shape is ~0 and this is the rev8 pull toward hour-1 persistence;
+    # no-op when pre/h1 is tiny, so ordinary launches are untouched.
     f = _flatness_factor(p1, pre)
     if f < 1.0:
+        shape = _pre_release_shape(case.get("history_hourly"), day_start)
         rows_flat = []
         for row in rows_out:
             qs = row["q"]
-            s = (f - 1.0) * math.log(max(qs[2], 1e-9) / p1)
+            med_log = math.log(max(qs[2], 1e-9) / p1)
+            target = SHAPE_SHRINK * shape.get(row["hour"] - 1, 0.0)
+            s = (1.0 - f) * (target - med_log)
             nq = [round(min(max(q * math.exp(s), 1.0), 1e9), 2) for q in qs]
             prev = 0.0
             clean = []
