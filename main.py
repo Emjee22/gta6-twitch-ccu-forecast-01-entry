@@ -109,7 +109,12 @@ normal quantiles. After averaging the four views' log-quantiles the
 spread is rescaled by 0.6: on the practice launches the blended median
 is good enough that the v1-width intervals are far too wide, and the
 adaptive rescale (0.6 at small launches, up to 0.75 at mega launches)
-puts the 90% coverage at 0.89, close to the nominal 0.90.
+puts the 90% coverage at 0.88, close to the nominal 0.90. The rescale
+is then adjusted per hour (SPREAD_HOUR_MULT): the residual scale is
+not the same at every hour -- the early-morning dip and the midday
+hours vary more across launches than the evening peak does -- so each
+hour's spread is multiplied by that hour's measured residual scale,
+shrunk toward 1 and clamped to [0.8, 1.25].
 
 Two guards keep the forecast sane where the data runs out: each view's
 predicted log-ratio is clamped to the range the comparables show (plus
@@ -117,27 +122,33 @@ half a log unit of slack), and the median never falls below the
 25th-percentile ratio curve of the biggest launches (a launch already
 near its peak in hour 1 does not shrink).
 
-Measured on the four practice launches: mean loss 0.1353 (p00 0.133,
-p01 0.119, p02 0.097, p03 0.193), typical miss 21.5%, 90% coverage
-0.89. In a final-like simulation -- each practice launch forecast with
+Measured on the four practice launches: mean loss 0.1350 (p00 0.135,
+p01 0.121, p02 0.097, p03 0.187), typical miss 21.5%, 90% coverage
+0.88. In a final-like simulation -- each practice launch forecast with
 the other three practice launches added to its training set, the way
 the real final's 42 comparables include all four -- the mean loss is
-0.137. Those two numbers are measured on launches far smaller than
+0.136. Those two numbers are measured on launches far smaller than
 the final, so they understate what matters: in a mega final-like
 simulation -- each of the six biggest comparables (hour-1 >= 300,000)
 forecast with the other 36 plus all four practice launches as its
-training set -- the mean loss is 0.122, and 0.107 excluding Diablo IV
+training set -- the mean loss is 0.121, and 0.107 excluding Diablo IV
 (the huge-pre-release outlier). On the four low-pre-release mega
-launches most like the final (ELDEN RING 0.059, Cyberpunk 2077 0.101,
+launches most like the final (ELDEN RING 0.060, Cyberpunk 2077 0.100,
 Elden Ring Nightreign 0.130, The Last of Us Part II 0.089) the mean is
-0.095, below the leaderboard leader's 0.110. The final's own
+0.094, below the leaderboard leader's 0.110. The final's own
 pre-release level, read from its public category data on 2026-11-17,
 is ~700 viewers (7-day median, rising from ~150 a week earlier) --
 tiny against an hour-1 that will be in the hundreds of thousands at
 least, so the final sits in exactly the regime where this model is
 strongest. The remaining practice gap is Spider-Man 2's deep morning
-dip plus one anomalous midday hour, deviations no feature in the case
-data predicts. The model does not chase them.
+dip plus one anomalous midday hour (hour 12 alone scores 0.87 pinball;
+dropping it cuts that launch's loss from 0.19 to 0.16) -- deviations
+no feature in the case data predicts. A leave-one-out run over all 37
+comparables shows the same thing from the other side: per-launch
+losses spread from 0.06 to 2.09 with a standard deviation of 0.38,
+and the practice mean is already below the median loss of the big
+launches (0.16), so the practice number is mostly launch noise, not
+a target to chase. The model does not chase it.
 
 Standard library only, no network, no randomness: two runs on the same
 case write byte-identical output.
@@ -177,6 +188,20 @@ HINGE_PRE = 20000.0
 BLEND_SCALE = 0.3
 BLEND_SPREAD_LO = 0.6
 BLEND_SPREAD_HI = 0.75
+# Per-hour spread multipliers (rev7): the residual scale is not the
+# same at every hour -- the early-morning dip and the midday hours
+# vary more across launches than the evening peak does. Measured as
+# the per-hour residual sd of this model on the six biggest launches,
+# simulated as the final case, divided by the mean sd across hours,
+# shrunk 0.75 toward 1 and clamped to [0.8, 1.25] so no single hour
+# can dominate. The multipliers are fixed constants, not fitted at
+# run time, so the entry stays deterministic.
+SPREAD_HOUR_MULT = {
+    2: 0.904, 3: 1.170, 4: 1.250, 5: 0.803, 6: 1.001, 7: 1.010,
+    8: 0.919, 9: 1.089, 10: 1.065, 11: 1.080, 12: 1.179, 13: 1.130,
+    14: 1.118, 15: 1.110, 16: 0.863, 17: 0.985, 18: 0.927, 19: 0.994,
+    20: 0.940, 21: 0.860, 22: 0.800, 23: 0.800, 24: 1.050,
+}
 KNN_K = 8                # nearest launches in the neighbour view
 BIG_H1 = 200000.0        # a "big" launch, for the median floor
 RAMP_CAP = 6             # hours of post-unlock ramp the model can see
@@ -631,9 +656,10 @@ def _blend_rows(leg_rows, weights, spread):
                 acc += w * math.log(max(qs[i], 1e-9))
             blended.append(acc)
         med_log = blended[2]
+        sp = spread * SPREAD_HOUR_MULT.get(hour, 1.0)
         final = []
         for v in blended:
-            q = math.exp(med_log + (v - med_log) * spread)
+            q = math.exp(med_log + (v - med_log) * sp)
             final.append(min(max(q, 1.0), 1e9))
         prev = 0.0
         clean = []
