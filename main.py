@@ -1121,6 +1121,10 @@ def _apply_final_only(case, day_start, p1, rows_out):
     2b. Stream freshness (streams[].started_at): see the inline
        note -- a +/-0.015 log tilt on hours 2-8, only when streams
        are present (never in practice).
+    2c. Two-way size-gated spread: mega launches over-cover so
+       their spread tightens 0.95x; mid launches under-cover so
+       theirs widens 1.05x. Gate is the hour-1 print (300k is the
+       sims' mega/mid split: mid max 166k, mega min 320k).
     3. Category share (categories_hourly): GTA VI's share of the
        top-20 categories' viewers at the last hourly read. A
        dominant share means the game is carrying Twitch and the
@@ -1174,6 +1178,11 @@ def _apply_final_only(case, day_start, p1, rows_out):
         if p1 and p1 > 0 and top1 > 0:
             share1 = min(max(top1 / p1, 0.0), 1.0)
             spread_mult = max(0.85, min(1.30, 1.0 + 0.5 * (share1 - 0.30)))
+    # 2c. Two-way size-gated spread (C3 audit, measured 17 Nov).
+    # Sims vs v3: mega -0.7%, big -1.1%, GTA-like -0.6%,
+    # final-like -0.2%, pure 0.0%. Uniform 0.95x hurt final-like
+    # (+0.3%) and big (+1.0%) instead, so the gate is essential.
+    spread_mult *= 0.95 if p1 >= 300000 else 1.05
     # 2b. Stream freshness (streams[].started_at, Y). At the
     # checkpoint the top streams are a mix of the fresh midnight
     # launch wave (started 1-2h ago, in for the long haul) and the
