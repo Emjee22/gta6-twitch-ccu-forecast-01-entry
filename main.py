@@ -433,9 +433,10 @@ def _median(values):
 def _num(v):
     # Coerce untrusted input to float; any bad value -> 0.0 (BI).
     try:
-        return float(v)
+        f = float(v)
     except Exception:
         return 0.0
+    return f if abs(f) < float("inf") else 0.0
 
 
 def _dp(ps):
@@ -656,7 +657,7 @@ def _leg_kernel_ols(p1, pre, comps, t_pc=True, vpc_t=None, dip_t=0.0):
     """
     log_h1 = math.log(p1)
     log_pre = math.log(max(pre, 1.0))
-    log_vpc_t = math.log(max(vpc_t, 1.0)) if vpc_t else None
+    log_vpc_t = math.log(max(vpc_t, 1.0)) if vpc_t is not None else None
     med, spr = {}, {}
     for hour in range(2, 25):
         rows4 = []
@@ -824,7 +825,7 @@ def _leg_neighbours(p1, pre, comps, vpc_t=None):
     """
     log_h1 = math.log(p1)
     log_pre = math.log(max(pre, 1.0))
-    log_vpc_t = math.log(max(vpc_t, 1.0)) if vpc_t else None
+    log_vpc_t = math.log(max(vpc_t, 1.0)) if vpc_t is not None else None
     scored = []
     for c in comps:
         d1 = (math.log(c["h1"]) - log_h1) / KERNEL_BANDWIDTH
