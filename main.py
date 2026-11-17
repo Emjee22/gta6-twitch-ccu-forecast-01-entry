@@ -41,9 +41,16 @@ launches and on leave-one-out splits of the comparables:
     smears Wolverine's late evening rise backwards into the midday,
     where the truth sags. Dropping it improves the practice loss from
     0.143 to 0.140, so this version does not smooth at all.
+  * A nearest-neighbour view earns its place. On its own the median
+    curve of the 8 most similar launches (by the same 2-D distance)
+    scores only 0.20, but as a fourth leg it is the only view that
+    reads Wolverine's midday sag right, cutting its loss from 0.161
+    to 0.133, and it improves the leave-one-out loss on big launches
+    too. It is kept at one quarter of the blend: more than that and
+    its noise starts to dominate.
 
-This version therefore forecasts with three different views of the same
-comparables and averages them in log space, equal thirds:
+This version therefore forecasts with four different views of the same
+comparables and averages them in log space, equal quarters:
 
   1. Per-hour kernel-weighted regression: for each hour h,
      log(viewers_h / viewers_1) ~ a + b*log(viewers_1)
@@ -71,12 +78,19 @@ comparables and averages them in log space, equal thirds:
      smooth by construction and the evening shape borrows strength
      from the morning.
 
+  4. Nearest-neighbour median: for each hour, the median log-ratio of
+     the 8 most similar launches by the 2-D distance, with the spread
+     from their interquartile range. No regression at all, so it
+     cannot extrapolate -- but where the regression views all agree
+     on the wrong shape, the neighbours' raw curve pulls the blend
+     back toward what similar launches actually did.
+
 The spread of each view is its own kernel-weighted residual standard
 deviation (times 0.75, clamped to [0.25, 1.5] log units), turned into
-normal quantiles. After averaging the three views' log-quantiles the
+normal quantiles. After averaging the four views' log-quantiles the
 spread is rescaled by 0.6: on the practice launches the blended median
 is good enough that the v1-width intervals are far too wide, and 0.6
-puts the 90% coverage at 0.87, close to the nominal 0.90.
+puts the 90% coverage at 0.88, close to the nominal 0.90.
 
 Two guards keep the forecast sane where the data runs out: each view's
 predicted log-ratio is clamped to the range the comparables show (plus
@@ -84,16 +98,16 @@ half a log unit of slack), and the median never falls below the
 25th-percentile ratio curve of the biggest launches (a launch already
 near its peak in hour 1 does not shrink).
 
-Measured on the four practice launches: mean loss 0.140 (p00 0.161,
-p01 0.108, p02 0.091, p03 0.198), typical miss 24.8%, 90% coverage
-0.87. In a final-like simulation -- each practice launch forecast with
+Measured on the four practice launches: mean loss 0.133 (p00 0.133,
+p01 0.117, p02 0.087, p03 0.194), typical miss 23.3%, 90% coverage
+0.88. In a final-like simulation -- each practice launch forecast with
 the other three practice launches added to its training set, the way
 the real final's 42 comparables include all four -- the mean loss is
-0.139. Two cases sit near the leaderboard leader's level already
-(p01/p02 at 0.11/0.09 vs the leader's 0.110 overall); the remaining
-gap is Wolverine's late rise and Spider-Man 2's deep morning dip plus
-one anomalous midday hour, deviations no feature in the case data
-predicts. The model does not chase them.
+0.135. Three cases sit near the leaderboard leader's level already
+(p01/p02/p00 at 0.12/0.09/0.13 vs the leader's 0.110 overall); the
+remaining gap is Spider-Man 2's deep morning dip plus one anomalous
+midday hour, deviations no feature in the case data predicts. The
+model does not chase them.
 
 Standard library only, no network, no randomness: two runs on the same
 case write byte-identical output.
@@ -115,10 +129,11 @@ SPREAD_FACTOR = 0.75     # shrinks each view's residual spread
 MIN_SPREAD = 0.25        # log units; keeps quantiles apart on degenerate fits
 MAX_SPREAD = 1.5
 PRE_WINDOW_DAYS = 7
-# Blend weights for the three views (2-D-kernel OLS, unlock ramp,
-# pooled shape) and the final spread rescale after blending.
-BLEND_WEIGHTS = (0.34, 0.33, 0.33)
+# Blend weights for the four views (2-D-kernel OLS, unlock ramp,
+# pooled shape, nearest neighbours) and the final spread rescale.
+BLEND_WEIGHTS = (0.25, 0.25, 0.25, 0.25)
 BLEND_SPREAD = 0.6
+KNN_K = 8                # nearest launches in the neighbour view
 BIG_H1 = 200000.0        # a "big" launch, for the median floor
 RAMP_CAP = 6             # hours of post-unlock ramp the model can see
 STEP_JUMP = 0.15         # smallest log jump that counts as a real unlock
@@ -436,6 +451,41 @@ def _leg_pooled_shape(p1, pre, comps, step_target):
     return med, spr
 
 
+def _leg_neighbours(p1, pre, comps):
+    """View 4: median curve of the KNN_K most similar launches.
+
+    Similarity is the same 2-D distance as view 1 (log hour-1, log
+    pre-release). For each hour the median log-ratio of the neighbours
+    is the forecast and their interquartile range (over 1.349, the
+    normal IQR in sd units) is the spread. No fitting, so no
+    extrapolation -- the view can only repeat what similar launches
+    actually did, which is exactly what the blend needs where the
+    regression views agree on the wrong shape.
+    Returns (median log-ratio per hour, spread per hour).
+    """
+    log_h1 = math.log(p1)
+    log_pre = math.log(max(pre, 1.0))
+    scored = []
+    for c in comps:
+        d1 = (math.log(c["h1"]) - log_h1) / KERNEL_BANDWIDTH
+        d2 = (math.log(max(c["pre"], 1.0)) - log_pre) / KERNEL_BANDWIDTH_PRE
+        scored.append((d1 * d1 + d2 * d2, c))
+    scored.sort(key=lambda t: t[0])
+    near = [c for _, c in scored[:KNN_K]]
+    med, spr = {}, {}
+    for hour in range(2, 25):
+        ratios = sorted(math.log(c["curve"][hour - 1] / c["h1"]) for c in near)
+        n = len(ratios)
+        if n % 2:
+            med[hour] = ratios[n // 2]
+        else:
+            med[hour] = (ratios[n // 2 - 1] + ratios[n // 2]) / 2.0
+        q25 = ratios[int(0.25 * (n - 1))]
+        q75 = ratios[int(0.75 * (n - 1))]
+        spr[hour] = max((q75 - q25) / 1.349, MIN_SPREAD)
+    return med, spr
+
+
 def _median_floor(comps):
     """25th-percentile log-ratio curve of the biggest launches.
 
@@ -483,7 +533,7 @@ def _build_rows(p1, comps, med, spr):
 
 
 def _blend_rows(leg_rows):
-    """Average the three views' log-quantiles, then rescale the spread.
+    """Average the four views' log-quantiles, then rescale the spread.
 
     Averaging in log space keeps the blend's median between the views'
     medians and its spread between their spreads; the 0.6 rescale
@@ -554,10 +604,12 @@ def forecast_case(case):
         med1, spr1 = _leg_kernel_ols(p1, pre, comps)
         med2, spr2 = _leg_unlock_ramp(p1, pre, step_comps, step_target)
         med3, spr3 = _leg_pooled_shape(p1, pre, step_comps, step_target)
+        med4, spr4 = _leg_neighbours(p1, pre, comps)
         rows1 = _build_rows(p1, comps, med1, spr1)
         rows2 = _build_rows(p1, step_comps, med2, spr2)
         rows3 = _build_rows(p1, step_comps, med3, spr3)
-        rows_out = _blend_rows([rows1, rows2, rows3])
+        rows4 = _build_rows(p1, comps, med4, spr4)
+        rows_out = _blend_rows([rows1, rows2, rows3, rows4])
     else:
         # Too few usable comparables: fall back to the plain empirical
         # quantiles of the log-ratios, or flat persistence if even that
